@@ -1625,4 +1625,99 @@ mod tests {
         assert_eq!(combined.len(), 6);
         assert!(combiner.validate(&combined));
     }
+
+    #[test]
+fn test_large_instance_100_cities() {
+    // Generate random 100-city Euclidean instance
+    let mut rng = rand::thread_rng();
+    let n = 100;
+    let points: Vec<(f64, f64)> = (0..n)
+        .map(|_| (rng.gen::<f64>() * 100.0, rng.gen::<f64>() * 100.0))
+        .collect();
+    
+    let mut matrix_data = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            let dx = points[i].0 - points[j].0;
+            let dy = points[i].1 - points[j].1;
+            matrix_data[i * n + j] = (dx * dx + dy * dy).sqrt();
+        }
+    }
+    
+    let solver = HybridDAGQuantumTSP::new(matrix_data, n).unwrap();
+    
+    // Use internal methods directly (bypass WASM-dependent solve())
+    let t0 = now_ms();
+    
+    // Decompose and solve DAG
+    let node_solutions = solver.solve_dag();
+    let dag = solver.decomposer.decompose();
+    
+    // Collect leaf routes
+    let leaf_routes: Vec<Vec<usize>> = dag
+        .leaves
+        .iter()
+        .filter_map(|&leaf_id| {
+            node_solutions.get(&leaf_id).and_then(|sol| {
+                if sol.success && !sol.route.is_empty() {
+                    Some(sol.route.clone())
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+    
+    // Merge routes
+    let mut merged = solver.combiner.combine(&leaf_routes);
+    
+    if !solver.combiner.validate(&merged) {
+        merged = nearest_neighbor(&solver.matrix, 0).0;
+    }
+    
+    // Polish
+    if solver.config.enable_2opt_polish {
+        merged = two_opt_cached(&solver.matrix, &merged);
+    }
+    
+    let elapsed = (now_ms() - t0) / 1000.0;
+    
+    // Close tour
+    let closed = {
+        let mut c = merged.clone();
+        c.push(merged[0]);
+        c
+    };
+    let dist = route_distance(&solver.matrix, &merged, true);
+    
+    // Verify solution
+    assert!(dist > 0.0);
+    assert!(dist < f64::INFINITY);
+    assert_eq!(closed.len(), n + 1);
+    assert_eq!(closed[0], closed[n]);
+    
+    // All cities visited exactly once
+    let mut visited: HashSet<usize> = HashSet::new();
+    for &city in &closed[..n] {
+        assert!(visited.insert(city), "City {} visited twice", city);
+    }
+    assert_eq!(visited.len(), n);
+    
+    // Compute NN baseline for comparison
+    let (_, nn_dist) = nearest_neighbor(&solver.matrix, 0);
+    let improvement = (nn_dist - dist) / nn_dist * 100.0;
+    
+    println!("\n100-City Results:");
+    println!("  NN baseline:    {:.2}", nn_dist);
+    println!("  HDQTS distance: {:.2}", dist);
+    println!("  Improvement:    {:.2}%", improvement);
+    println!("  Execution time: {:.3}s", elapsed);
+    println!("  DAG nodes:      {}", dag.nodes.len());
+    println!("  DAG leaves:     {}", dag.leaves.len());
+    println!("  Route valid:    YES ({} unique cities)", n);
+    
+    // NN baseline should be a reasonable upper bound
+    // (HDQTS should not be worse than 2x NN)
+    assert!(dist <= nn_dist * 2.0, "HDQTS distance {} is > 2x NN baseline {}", dist, nn_dist);
+}
 }
