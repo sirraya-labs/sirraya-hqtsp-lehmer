@@ -8,6 +8,7 @@
 //
 // Compile: wasm-pack build --target web --release --out-dir pkg
 // Test: cargo test
+// Run CLI: cargo run --release
 //
 // ============================================================================
 
@@ -66,11 +67,11 @@ fn now_ms() -> f64 {
 ///   Result: [2, 3, 1], Full route: [0, 2, 3, 1]
 #[derive(Debug, Clone)]
 pub struct LehmerDecoder {
-    n: usize,                  // Total cities including start city 0
-    k: usize,                  // n-1 cities to permute
-    factorials: Vec<usize>,    // Precomputed 0!, 1!, ..., k!
-    total_permutations: usize, // (n-1)!
-    required_qubits: usize,    // ceil(log2((n-1)!))
+    n: usize,
+    k: usize,
+    factorials: Vec<usize>,
+    total_permutations: usize,
+    required_qubits: usize,
 }
 
 impl LehmerDecoder {
@@ -78,8 +79,7 @@ impl LehmerDecoder {
     pub fn new(n: usize) -> Self {
         let k = n.saturating_sub(1);
         
-        // Precompute factorials: [0!, 1!, 2!, ..., k!]
-        let mut factorials = vec![1]; // 0! = 1
+        let mut factorials = vec![1];
         for i in 1..=k {
             factorials.push(factorials.last().unwrap() * i);
         }
@@ -101,11 +101,7 @@ impl LehmerDecoder {
     }
     
     /// Decode an integer index to a permutation of {1, ..., n-1}.
-    ///
-    /// Uses factorial number system (Lehmer code) for O(n²) decoding.
-    /// The modulo clamp protects against out-of-range quantum measurements.
     pub fn decode(&self, index: usize) -> Vec<usize> {
-        // Clamp to valid range (quantum measurements can overshoot)
         let index = if self.total_permutations > 0 {
             index % self.total_permutations
         } else {
@@ -116,17 +112,14 @@ impl LehmerDecoder {
         let mut result = Vec::with_capacity(self.k);
         let mut remaining = index;
         
-        // Convert to factorial digits (most significant first)
         for i in (0..self.k).rev() {
             let fact = self.factorials[i];
             let digit = remaining / fact;
             remaining %= fact;
             
-            // Safety: digit should always be < available.len()
             if digit < available.len() {
                 result.push(available.remove(digit));
             } else {
-                // Fallback: just take remaining in order
                 result.extend(available.drain(..));
                 break;
             }
@@ -135,7 +128,7 @@ impl LehmerDecoder {
         result
     }
     
-    /// Encode a permutation back to its integer index (inverse of decode).
+    /// Encode a permutation back to its integer index.
     pub fn encode(&self, permutation: &[usize]) -> usize {
         let mut available: Vec<usize> = (1..self.n).collect();
         let mut index = 0;
@@ -183,7 +176,6 @@ impl LehmerDecoder {
         let mut good_indices = Vec::new();
         
         if self.total_permutations <= max_check {
-            // Full enumeration for small n
             for idx in 0..self.total_permutations {
                 let dist = self.compute_distance(idx, matrix);
                 if dist <= threshold {
@@ -191,7 +183,6 @@ impl LehmerDecoder {
                 }
             }
         } else {
-            // Random sampling for larger n
             let mut rng = rand::thread_rng();
             let mut samples: HashSet<usize> = HashSet::new();
             while samples.len() < max_check {
@@ -209,7 +200,6 @@ impl LehmerDecoder {
     }
     
     /// Find the best (minimum distance) route by full enumeration.
-    /// Only use for n ≤ 8 where total_permutations ≤ 40,320.
     pub fn find_best_route(&self, matrix: &DMatrix<f64>) -> (usize, f64) {
         let mut best_idx = 0;
         let mut best_dist = f64::INFINITY;
@@ -223,6 +213,16 @@ impl LehmerDecoder {
         }
         
         (best_idx, best_dist)
+    }
+
+    /// Get total number of permutations (n-1)!
+    pub fn total_permutations(&self) -> usize {
+        self.total_permutations
+    }
+    
+    /// Get required qubits for encoding
+    pub fn required_qubits(&self) -> usize {
+        self.required_qubits
     }
 }
 
@@ -239,16 +239,12 @@ impl ShotScheduler {
         Self { base_shots }
     }
     
-    /// Calculate optimal shots based on search space size.
-    /// More shots for larger spaces (Grover-optimal scaling).
     pub fn shots_for(&self, decoder: &LehmerDecoder) -> usize {
         let total = decoder.total_permutations as f64;
         let grover_factor = (total.sqrt() / 4.0).min(4.0).max(1.0);
         (self.base_shots as f64 * grover_factor) as usize
     }
     
-    /// Estimate whether quantum advantage is achievable.
-    /// Returns true when √(N) > 10 (roughly 100× speedup opportunity).
     pub fn quantum_advantage_viable(&self, decoder: &LehmerDecoder) -> bool {
         let total = decoder.total_permutations as f64;
         total.sqrt() > 10.0
@@ -268,11 +264,6 @@ impl IncrementalDistance {
         Self { matrix }
     }
     
-    /// Compute distance delta for reversing segment [i, j].
-    /// Before: ...→a→b→...→c→d→...
-    /// After:  ...→a→c→...→b→d→...
-    /// Delta = (a→c + b→d) - (a→b + c→d)
-    /// If delta < 0, the reversal improves the tour.
     pub fn two_opt_delta(&self, route: &[usize], i: usize, j: usize) -> f64 {
         let n = route.len();
         if i == 0 || j >= n - 1 {
@@ -290,7 +281,6 @@ impl IncrementalDistance {
         added - removed
     }
     
-    /// Compute full route distance.
     pub fn full_distance(&self, route: &[usize]) -> f64 {
         let mut total = 0.0;
         for i in 0..route.len() {
@@ -349,7 +339,7 @@ impl Default for SolverConfig {
             enable_2opt_polish: true,
             enable_3opt_polish: false,
             decomposition_method: "auto".to_string(),
-            max_subproblem_size: 4,
+            max_subproblem_size: 6,
             shots: 512,
             parallel_workers: 4,
         }
@@ -406,7 +396,6 @@ pub struct FinalResult {
 // UTILITY FUNCTIONS
 // ============================================================================
 
-/// Compute total distance of a route (open or closed)
 fn route_distance(matrix: &DMatrix<f64>, route: &[usize], closed: bool) -> f64 {
     if route.len() < 2 {
         return 0.0;
@@ -421,7 +410,6 @@ fn route_distance(matrix: &DMatrix<f64>, route: &[usize], closed: bool) -> f64 {
     total
 }
 
-/// Nearest-neighbor heuristic — O(n²)
 fn nearest_neighbor(matrix: &DMatrix<f64>, start: usize) -> (Vec<usize>, f64) {
     let n = matrix.nrows();
     let mut unvisited: HashSet<usize> = (0..n).collect();
@@ -447,7 +435,6 @@ fn nearest_neighbor(matrix: &DMatrix<f64>, start: usize) -> (Vec<usize>, f64) {
     (route, dist)
 }
 
-/// Generate combinations (for Held-Karp)
 fn combinations<T: Clone>(items: &[T], k: usize) -> Vec<Vec<T>> {
     if k == 0 {
         return vec![vec![]];
@@ -465,7 +452,6 @@ fn combinations<T: Clone>(items: &[T], k: usize) -> Vec<Vec<T>> {
     result
 }
 
-/// Exact TSP via Held-Karp DP — O(n² · 2^n)
 fn held_karp(matrix: &DMatrix<f64>) -> (Vec<usize>, f64) {
     let n = matrix.nrows();
     
@@ -969,86 +955,35 @@ impl TourCombiner {
 }
 
 // ============================================================================
-// MAIN WASM-EXPOSED SOLVER
+// MAIN SOLVER STRUCT
 // ============================================================================
 
 #[wasm_bindgen]
 pub struct HybridDAGQuantumTSP {
-    matrix: DMatrix<f64>,
-    n: usize,
-    config: SolverConfig,
-    decomposer: AdaptiveDAGDecomposer,
-    combiner: TourCombiner,
+    pub(crate) matrix: DMatrix<f64>,
+    pub(crate) n: usize,
+    pub(crate) config: SolverConfig,
+    pub(crate) decomposer: AdaptiveDAGDecomposer,
+    pub(crate) combiner: TourCombiner,
 }
 
-#[wasm_bindgen]
+// ============================================================================
+// NATIVE API — For CLI binaries and tests (not WASM-exposed)
+// ============================================================================
+
 impl HybridDAGQuantumTSP {
-    /// Create a new solver from a flat distance matrix (row-major order).
-    #[wasm_bindgen(constructor)]
-    pub fn new(distance_matrix: Vec<f64>, n: usize) -> Result<HybridDAGQuantumTSP, JsValue> {
-        if distance_matrix.len() != n * n {
-            return Err(JsValue::from_str(
-                &format!(
-                    "Distance matrix must be {} × {} ({} elements), got {} elements",
-                    n, n, n * n, distance_matrix.len()
-                )
-            ));
-        }
-
-        let matrix = DMatrix::from_row_slice(n, n, &distance_matrix);
-        let config = SolverConfig::default();
-        let decomposer = AdaptiveDAGDecomposer::new(matrix.clone(), config.max_subproblem_size);
-        let combiner = TourCombiner::new(matrix.clone());
-
-        Ok(Self {
-            matrix,
-            n,
-            config,
-            decomposer,
-            combiner,
-        })
-    }
-
-    /// Create solver with custom configuration from JSON.
-    pub fn with_config(
-        distance_matrix: Vec<f64>,
-        n: usize,
-        config_js: JsValue,
-    ) -> Result<HybridDAGQuantumTSP, JsValue> {
-        let config: SolverConfig = serde_wasm_bindgen::from_value(config_js)
-            .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
-
-        if distance_matrix.len() != n * n {
-            return Err(JsValue::from_str("Distance matrix size mismatch"));
-        }
-
-        let matrix = DMatrix::from_row_slice(n, n, &distance_matrix);
-        let decomposer = AdaptiveDAGDecomposer::new(matrix.clone(), config.max_subproblem_size);
-        let combiner = TourCombiner::new(matrix.clone());
-
-        Ok(Self {
-            matrix,
-            n,
-            config,
-            decomposer,
-            combiner,
-        })
-    }
-
-    /// Solve the TSP and return JSON-serializable result.
-    pub fn solve(&self) -> JsValue {
+    /// Solve TSP in native mode and return FinalResult directly.
+    /// Works in native binaries, CLI, and tests.
+    pub fn solve_native(&self) -> FinalResult {
         let t0 = now_ms();
 
-        // If problem fits in one subproblem, use Lehmer-enhanced solver
         if self.n <= self.config.max_subproblem_size {
-            return self.solve_with_lehmer(t0);
+            return self.solve_with_lehmer_native(t0);
         }
 
-        // Solve DAG nodes level by level
         let node_solutions = self.solve_dag();
-
-        // Collect leaf routes
         let dag = self.decomposer.decompose();
+        
         let leaf_routes: Vec<Vec<usize>> = dag
             .leaves
             .iter()
@@ -1063,19 +998,14 @@ impl HybridDAGQuantumTSP {
             })
             .collect();
 
-        // Merge routes
         let mut merged = self.combiner.combine(&leaf_routes);
-
         if !self.combiner.validate(&merged) {
             merged = nearest_neighbor(&self.matrix, 0).0;
         }
-
-        // Polish with edge-cached 2-opt
         if self.config.enable_2opt_polish {
             merged = two_opt_cached(&self.matrix, &merged);
         }
 
-        // Close tour
         let closed = {
             let mut c = merged.clone();
             c.push(merged[0]);
@@ -1083,10 +1013,9 @@ impl HybridDAGQuantumTSP {
         };
         let dist = route_distance(&self.matrix, &merged, true);
         let elapsed = (now_ms() - t0) / 1000.0;
-
         let stats = self.build_stats(&node_solutions, elapsed);
 
-        serde_wasm_bindgen::to_value(&FinalResult {
+        FinalResult {
             success: true,
             route: closed,
             distance: dist,
@@ -1094,12 +1023,10 @@ impl HybridDAGQuantumTSP {
             node_solutions: node_solutions.clone(),
             dag,
             stats,
-        })
-        .unwrap_or(JsValue::NULL)
+        }
     }
 
-    /// Solve a small instance using Lehmer decoder directly.
-    fn solve_with_lehmer(&self, t0: f64) -> JsValue {
+    fn solve_with_lehmer_native(&self, t0: f64) -> FinalResult {
         let decoder = LehmerDecoder::new(self.n);
         let (best_idx, best_dist) = decoder.find_best_route(&self.matrix);
         let route = decoder.decode_full_route(best_idx);
@@ -1118,26 +1045,23 @@ impl HybridDAGQuantumTSP {
         let elapsed = (now_ms() - t0) / 1000.0;
 
         let mut node_solutions = HashMap::new();
-        node_solutions.insert(
-            0,
-            SubSolution {
-                success: true,
-                route: route.clone(),
-                distance: best_dist,
-                probability: 1.0,
-                shots_used: 0,
-                exec_time: elapsed,
-                qubits_used: 0,
-                node_id: 0,
-                method: "lehmer_exact".to_string(),
-                error: None,
-            },
-        );
+        node_solutions.insert(0, SubSolution {
+            success: true,
+            route: route.clone(),
+            distance: best_dist,
+            probability: 1.0,
+            shots_used: 0,
+            exec_time: elapsed,
+            qubits_used: 0,
+            node_id: 0,
+            method: "lehmer_exact".to_string(),
+            error: None,
+        });
 
         let dag = self.decomposer.decompose();
         let stats = self.build_stats(&node_solutions, elapsed);
 
-        serde_wasm_bindgen::to_value(&FinalResult {
+        FinalResult {
             success: true,
             route: closed,
             distance: best_dist,
@@ -1145,11 +1069,10 @@ impl HybridDAGQuantumTSP {
             node_solutions: node_solutions.clone(),
             dag,
             stats,
-        })
-        .unwrap_or(JsValue::NULL)
+        }
     }
 
-    fn solve_dag(&self) -> HashMap<usize, SubSolution> {
+    pub(crate) fn solve_dag(&self) -> HashMap<usize, SubSolution> {
         let dag = self.decomposer.decompose();
         let mut solutions = HashMap::new();
 
@@ -1228,7 +1151,6 @@ impl HybridDAGQuantumTSP {
             };
         }
 
-        // Use Lehmer decoder for exact solution on subproblem
         let decoder = LehmerDecoder::new(node.cities.len());
         let mut best_idx = 0;
         let mut best_dist = f64::INFINITY;
@@ -1271,14 +1193,8 @@ impl HybridDAGQuantumTSP {
     ) -> HashMap<String, f64> {
         let total = node_solutions.len() as f64;
         let successful = node_solutions.values().filter(|s| s.success).count() as f64;
-        let lehmer = node_solutions
-            .values()
-            .filter(|s| s.method == "lehmer_exact")
-            .count() as f64;
-        let trivial = node_solutions
-            .values()
-            .filter(|s| s.method == "trivial")
-            .count() as f64;
+        let lehmer = node_solutions.values().filter(|s| s.method == "lehmer_exact").count() as f64;
+        let trivial = node_solutions.values().filter(|s| s.method == "trivial").count() as f64;
         let failed = total - successful;
 
         let mut stats = HashMap::new();
@@ -1293,10 +1209,169 @@ impl HybridDAGQuantumTSP {
 }
 
 // ============================================================================
-// WASM BINDINGS — Simple API
+// WASM BINDINGS — Exposed to JavaScript/browser
 // ============================================================================
 
-/// Quick solve: takes a flat distance matrix and returns the optimized route.
+#[wasm_bindgen]
+impl HybridDAGQuantumTSP {
+    /// Create a new solver from a flat distance matrix (row-major order).
+    #[wasm_bindgen(constructor)]
+    pub fn new(distance_matrix: Vec<f64>, n: usize) -> Result<HybridDAGQuantumTSP, JsValue> {
+        if distance_matrix.len() != n * n {
+            return Err(JsValue::from_str(
+                &format!(
+                    "Distance matrix must be {} × {} ({} elements), got {} elements",
+                    n, n, n * n, distance_matrix.len()
+                )
+            ));
+        }
+
+        let matrix = DMatrix::from_row_slice(n, n, &distance_matrix);
+        let config = SolverConfig::default();
+        let decomposer = AdaptiveDAGDecomposer::new(matrix.clone(), config.max_subproblem_size);
+        let combiner = TourCombiner::new(matrix.clone());
+
+        Ok(Self {
+            matrix,
+            n,
+            config,
+            decomposer,
+            combiner,
+        })
+    }
+
+    /// Create solver with custom configuration from JSON.
+    pub fn with_config(
+        distance_matrix: Vec<f64>,
+        n: usize,
+        config_js: JsValue,
+    ) -> Result<HybridDAGQuantumTSP, JsValue> {
+        let config: SolverConfig = serde_wasm_bindgen::from_value(config_js)
+            .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
+
+        if distance_matrix.len() != n * n {
+            return Err(JsValue::from_str("Distance matrix size mismatch"));
+        }
+
+        let matrix = DMatrix::from_row_slice(n, n, &distance_matrix);
+        let decomposer = AdaptiveDAGDecomposer::new(matrix.clone(), config.max_subproblem_size);
+        let combiner = TourCombiner::new(matrix.clone());
+
+        Ok(Self {
+            matrix,
+            n,
+            config,
+            decomposer,
+            combiner,
+        })
+    }
+
+    /// Solve the TSP and return JSON-serializable result (for WASM/browser).
+    pub fn solve(&self) -> JsValue {
+        let t0 = now_ms();
+
+        if self.n <= self.config.max_subproblem_size {
+            return self.solve_with_lehmer_wasm(t0);
+        }
+
+        let node_solutions = self.solve_dag();
+        let dag = self.decomposer.decompose();
+        
+        let leaf_routes: Vec<Vec<usize>> = dag
+            .leaves
+            .iter()
+            .filter_map(|&leaf_id| {
+                node_solutions.get(&leaf_id).and_then(|sol| {
+                    if sol.success && !sol.route.is_empty() {
+                        Some(sol.route.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+
+        let mut merged = self.combiner.combine(&leaf_routes);
+        if !self.combiner.validate(&merged) {
+            merged = nearest_neighbor(&self.matrix, 0).0;
+        }
+        if self.config.enable_2opt_polish {
+            merged = two_opt_cached(&self.matrix, &merged);
+        }
+
+        let closed = {
+            let mut c = merged.clone();
+            c.push(merged[0]);
+            c
+        };
+        let dist = route_distance(&self.matrix, &merged, true);
+        let elapsed = (now_ms() - t0) / 1000.0;
+        let stats = self.build_stats(&node_solutions, elapsed);
+
+        serde_wasm_bindgen::to_value(&FinalResult {
+            success: true,
+            route: closed,
+            distance: dist,
+            exec_time: elapsed,
+            node_solutions: node_solutions.clone(),
+            dag,
+            stats,
+        })
+        .unwrap_or(JsValue::NULL)
+    }
+
+    fn solve_with_lehmer_wasm(&self, t0: f64) -> JsValue {
+        let decoder = LehmerDecoder::new(self.n);
+        let (best_idx, best_dist) = decoder.find_best_route(&self.matrix);
+        let route = decoder.decode_full_route(best_idx);
+
+        let mut polished = route.clone();
+        if self.config.enable_2opt_polish {
+            polished = two_opt_cached(&self.matrix, &polished);
+        }
+
+        let closed = {
+            let mut c = polished.clone();
+            c.push(polished[0]);
+            c
+        };
+
+        let elapsed = (now_ms() - t0) / 1000.0;
+
+        let mut node_solutions = HashMap::new();
+        node_solutions.insert(0, SubSolution {
+            success: true,
+            route: route.clone(),
+            distance: best_dist,
+            probability: 1.0,
+            shots_used: 0,
+            exec_time: elapsed,
+            qubits_used: 0,
+            node_id: 0,
+            method: "lehmer_exact".to_string(),
+            error: None,
+        });
+
+        let dag = self.decomposer.decompose();
+        let stats = self.build_stats(&node_solutions, elapsed);
+
+        serde_wasm_bindgen::to_value(&FinalResult {
+            success: true,
+            route: closed,
+            distance: best_dist,
+            exec_time: elapsed,
+            node_solutions: node_solutions.clone(),
+            dag,
+            stats,
+        })
+        .unwrap_or(JsValue::NULL)
+    }
+}
+
+// ============================================================================
+// STANDALONE WASM FUNCTIONS
+// ============================================================================
+
 #[wasm_bindgen]
 pub fn solve_tsp(distance_matrix: Vec<f64>, n: usize) -> JsValue {
     match HybridDAGQuantumTSP::new(distance_matrix, n) {
@@ -1305,62 +1380,49 @@ pub fn solve_tsp(distance_matrix: Vec<f64>, n: usize) -> JsValue {
     }
 }
 
-/// Solve with custom configuration.
 #[wasm_bindgen]
-pub fn solve_tsp_with_config(
-    distance_matrix: Vec<f64>,
-    n: usize,
-    config: JsValue,
-) -> JsValue {
+pub fn solve_tsp_with_config(distance_matrix: Vec<f64>, n: usize, config: JsValue) -> JsValue {
     match HybridDAGQuantumTSP::with_config(distance_matrix, n, config) {
         Ok(solver) => solver.solve(),
         Err(e) => JsValue::from_str(&format!("Error: {:?}", e)),
     }
 }
 
-/// Get version info.
 #[wasm_bindgen]
 pub fn version() -> String {
     "HDQTS v6.2 Rust/WASM — Lehmer-Enhanced Edition".to_string()
 }
 
-/// Decode a single route index to a city permutation (for testing/demo).
 #[wasm_bindgen]
 pub fn decode_route(n: usize, index: usize) -> Vec<usize> {
     let decoder = LehmerDecoder::new(n);
     decoder.decode_full_route(index)
 }
 
-/// Get total number of permutations for n cities.
 #[wasm_bindgen]
 pub fn total_routes(n: usize) -> usize {
     let decoder = LehmerDecoder::new(n);
     decoder.total_permutations
 }
 
-/// Benchmark all solvers and return comparison.
 #[wasm_bindgen]
 pub fn benchmark_all(distance_matrix: Vec<f64>, n: usize) -> JsValue {
     let matrix = DMatrix::from_row_slice(n, n, &distance_matrix);
 
-    // HDQTS with Lehmer
     let t0 = now_ms();
     let solver = HybridDAGQuantumTSP::new(distance_matrix.clone(), n).unwrap();
     let hdqts_result = solver.solve();
     let hdqts_time = (now_ms() - t0) / 1000.0;
 
-    // Nearest Neighbor
     let t0 = now_ms();
     let (nn_route, nn_dist) = nearest_neighbor(&matrix, 0);
     let nn_time = (now_ms() - t0) / 1000.0;
 
-    // 2-opt only
     let t0 = now_ms();
     let opt_route = two_opt_cached(&matrix, &nn_route);
     let opt_dist = route_distance(&matrix, &opt_route, true);
     let opt_time = (now_ms() - t0) / 1000.0;
 
-    // Held-Karp exact (if n ≤ 12)
     let hk_result = if n <= 12 {
         let t0 = now_ms();
         let (hk_route, hk_dist) = held_karp(&matrix);
@@ -1370,53 +1432,34 @@ pub fn benchmark_all(distance_matrix: Vec<f64>, n: usize) -> JsValue {
         None
     };
 
-    // Parse HDQTS result
-    let hdqts_distance = if let Ok(result) =
-        serde_wasm_bindgen::from_value::<FinalResult>(hdqts_result)
-    {
+    let hdqts_distance = if let Ok(result) = serde_wasm_bindgen::from_value::<FinalResult>(hdqts_result) {
         result.distance
     } else {
         f64::INFINITY
     };
 
     let mut results: HashMap<String, serde_json::Value> = HashMap::new();
-
-    results.insert(
-        "hdqts".to_string(),
-        serde_json::json!({
-            "distance": hdqts_distance,
-            "time_seconds": hdqts_time,
-            "method": "Lehmer-enhanced DAG decomposition + 2-opt"
-        }),
-    );
-
-    results.insert(
-        "nearest_neighbor".to_string(),
-        serde_json::json!({
-            "distance": nn_dist,
-            "time_seconds": nn_time,
-            "method": "Greedy nearest-neighbor heuristic"
-        }),
-    );
-
-    results.insert(
-        "2opt".to_string(),
-        serde_json::json!({
-            "distance": opt_dist,
-            "time_seconds": opt_time,
-            "method": "NN + 2-opt local search"
-        }),
-    );
-
+    results.insert("hdqts".to_string(), serde_json::json!({
+        "distance": hdqts_distance,
+        "time_seconds": hdqts_time,
+        "method": "Lehmer-enhanced DAG decomposition + 2-opt"
+    }));
+    results.insert("nearest_neighbor".to_string(), serde_json::json!({
+        "distance": nn_dist,
+        "time_seconds": nn_time,
+        "method": "Greedy nearest-neighbor heuristic"
+    }));
+    results.insert("2opt".to_string(), serde_json::json!({
+        "distance": opt_dist,
+        "time_seconds": opt_time,
+        "method": "NN + 2-opt local search"
+    }));
     if let Some((_, hk_dist, hk_time)) = hk_result {
-        results.insert(
-            "held_karp".to_string(),
-            serde_json::json!({
-                "distance": hk_dist,
-                "time_seconds": hk_time,
-                "method": "Held-Karp exact DP (provably optimal)"
-            }),
-        );
+        results.insert("held_karp".to_string(), serde_json::json!({
+            "distance": hk_dist,
+            "time_seconds": hk_time,
+            "method": "Held-Karp exact DP (provably optimal)"
+        }));
     }
 
     serde_wasm_bindgen::to_value(&results).unwrap_or(JsValue::NULL)
@@ -1489,7 +1532,6 @@ mod tests {
             15.0, 35.0, 0.0, 30.0,
             20.0, 25.0, 30.0, 0.0,
         ]);
-        
         let decoder = LehmerDecoder::new(4);
         let dist = decoder.compute_distance(0, &matrix);
         assert!((dist - 95.0).abs() < 0.01, "Expected 95, got {}", dist);
@@ -1503,7 +1545,6 @@ mod tests {
             15.0, 35.0, 0.0, 30.0,
             20.0, 25.0, 30.0, 0.0,
         ]);
-        
         let decoder = LehmerDecoder::new(4);
         let (best_idx, best_dist) = decoder.find_best_route(&matrix);
         let route = decoder.decode_full_route(best_idx);
@@ -1521,7 +1562,6 @@ mod tests {
             15.0, 35.0, 0.0, 30.0,
             20.0, 25.0, 30.0, 0.0,
         ]);
-        
         let (route, dist) = nearest_neighbor(&matrix, 0);
         assert_eq!(route.len(), 4);
         assert_eq!(route[0], 0);
@@ -1536,11 +1576,9 @@ mod tests {
             15.0, 35.0, 0.0, 30.0,
             20.0, 25.0, 30.0, 0.0,
         ]);
-        
         let (route, dist) = held_karp(&matrix);
         assert_eq!(route.len(), 4);
         assert_eq!(route[0], 0);
-        
         let decoder = LehmerDecoder::new(4);
         let (_, best_dist) = decoder.find_best_route(&matrix);
         assert!((dist - best_dist).abs() < 0.01);
@@ -1555,7 +1593,6 @@ mod tests {
             20.0, 25.0, 30.0, 0.0, 10.0,
             25.0, 30.0, 20.0, 10.0, 0.0,
         ]);
-        
         let (nn_route, nn_dist) = nearest_neighbor(&matrix, 0);
         let opt_route = two_opt_cached(&matrix, &nn_route);
         let opt_dist = route_distance(&matrix, &opt_route, true);
@@ -1570,19 +1607,13 @@ mod tests {
             15.0, 35.0, 0.0, 30.0,
             20.0, 25.0, 30.0, 0.0,
         ];
-        
         let solver = HybridDAGQuantumTSP::new(matrix, 4).unwrap();
-        
-        // Verify solver was created correctly
         assert_eq!(solver.n, 4);
         assert!(solver.config.enable_2opt_polish);
-        
-        // Test Lehmer decoder directly (works in both native and WASM)
         let decoder = LehmerDecoder::new(4);
         let (best_idx, best_dist) = decoder.find_best_route(&solver.matrix);
         assert!(best_dist > 0.0);
         assert!(best_dist < f64::INFINITY);
-        
         let route = decoder.decode_full_route(best_idx);
         assert_eq!(route.len(), 4);
         assert_eq!(route[0], 0);
@@ -1600,7 +1631,6 @@ mod tests {
             72.0, 43.0, 23.0, 72.0, 23.0, 61.0, 0.0, 42.0,
             42.0, 23.0, 43.0, 31.0, 52.0, 23.0, 42.0, 0.0,
         ]);
-        
         let decomposer = AdaptiveDAGDecomposer::new(matrix_d, 4);
         let dag = decomposer.decompose();
         assert!(dag.nodes.len() >= 2);
@@ -1618,7 +1648,6 @@ mod tests {
             25.0, 30.0, 20.0, 10.0, 0.0, 35.0,
             30.0, 20.0, 25.0, 15.0, 35.0, 0.0,
         ]);
-        
         let combiner = TourCombiner::new(matrix);
         let leaf_routes = vec![vec![0, 1, 2], vec![3, 4, 5]];
         let combined = combiner.combine(&leaf_routes);
@@ -1627,97 +1656,51 @@ mod tests {
     }
 
     #[test]
-fn test_large_instance_100_cities() {
-    // Generate random 100-city Euclidean instance
-    let mut rng = rand::thread_rng();
-    let n = 100;
-    let points: Vec<(f64, f64)> = (0..n)
-        .map(|_| (rng.gen::<f64>() * 100.0, rng.gen::<f64>() * 100.0))
-        .collect();
-    
-    let mut matrix_data = vec![0.0; n * n];
-    for i in 0..n {
-        for j in 0..n {
-            let dx = points[i].0 - points[j].0;
-            let dy = points[i].1 - points[j].1;
-            matrix_data[i * n + j] = (dx * dx + dy * dy).sqrt();
+    fn test_large_instance_100_cities() {
+        let mut rng = rand::thread_rng();
+        let n = 100;
+        let points: Vec<(f64, f64)> = (0..n)
+            .map(|_| (rng.gen::<f64>() * 100.0, rng.gen::<f64>() * 100.0))
+            .collect();
+        
+        let mut matrix_data = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let dx = points[i].0 - points[j].0;
+                let dy = points[i].1 - points[j].1;
+                matrix_data[i * n + j] = (dx * dx + dy * dy).sqrt();
+            }
         }
+        
+        let solver = HybridDAGQuantumTSP::new(matrix_data, n).unwrap();
+        
+        // Use solve_native() — works in tests!
+        let result = solver.solve_native();
+        
+        assert!(result.success);
+        assert!(result.distance > 0.0);
+        assert!(result.distance < f64::INFINITY);
+        assert_eq!(result.route.len(), n + 1);
+        assert_eq!(result.route[0], result.route[n]);
+        
+        let mut visited: HashSet<usize> = HashSet::new();
+        for &city in &result.route[..n] {
+            assert!(visited.insert(city), "City {} visited twice", city);
+        }
+        assert_eq!(visited.len(), n);
+        
+        let (_, nn_dist) = nearest_neighbor(&solver.matrix, 0);
+        let improvement = (nn_dist - result.distance) / nn_dist * 100.0;
+        
+        println!("\n100-City Results:");
+        println!("  NN baseline:    {:.2}", nn_dist);
+        println!("  HDQTS distance: {:.2}", result.distance);
+        println!("  Improvement:    {:.2}%", improvement);
+        println!("  Execution time: {:.3}s", result.exec_time);
+        println!("  DAG nodes:      {}", result.dag.nodes.len());
+        println!("  DAG leaves:     {}", result.dag.leaves.len());
+        println!("  Route valid:    YES ({} unique cities)", n);
+        
+        assert!(result.distance <= nn_dist * 2.0);
     }
-    
-    let solver = HybridDAGQuantumTSP::new(matrix_data, n).unwrap();
-    
-    // Use internal methods directly (bypass WASM-dependent solve())
-    let t0 = now_ms();
-    
-    // Decompose and solve DAG
-    let node_solutions = solver.solve_dag();
-    let dag = solver.decomposer.decompose();
-    
-    // Collect leaf routes
-    let leaf_routes: Vec<Vec<usize>> = dag
-        .leaves
-        .iter()
-        .filter_map(|&leaf_id| {
-            node_solutions.get(&leaf_id).and_then(|sol| {
-                if sol.success && !sol.route.is_empty() {
-                    Some(sol.route.clone())
-                } else {
-                    None
-                }
-            })
-        })
-        .collect();
-    
-    // Merge routes
-    let mut merged = solver.combiner.combine(&leaf_routes);
-    
-    if !solver.combiner.validate(&merged) {
-        merged = nearest_neighbor(&solver.matrix, 0).0;
-    }
-    
-    // Polish
-    if solver.config.enable_2opt_polish {
-        merged = two_opt_cached(&solver.matrix, &merged);
-    }
-    
-    let elapsed = (now_ms() - t0) / 1000.0;
-    
-    // Close tour
-    let closed = {
-        let mut c = merged.clone();
-        c.push(merged[0]);
-        c
-    };
-    let dist = route_distance(&solver.matrix, &merged, true);
-    
-    // Verify solution
-    assert!(dist > 0.0);
-    assert!(dist < f64::INFINITY);
-    assert_eq!(closed.len(), n + 1);
-    assert_eq!(closed[0], closed[n]);
-    
-    // All cities visited exactly once
-    let mut visited: HashSet<usize> = HashSet::new();
-    for &city in &closed[..n] {
-        assert!(visited.insert(city), "City {} visited twice", city);
-    }
-    assert_eq!(visited.len(), n);
-    
-    // Compute NN baseline for comparison
-    let (_, nn_dist) = nearest_neighbor(&solver.matrix, 0);
-    let improvement = (nn_dist - dist) / nn_dist * 100.0;
-    
-    println!("\n100-City Results:");
-    println!("  NN baseline:    {:.2}", nn_dist);
-    println!("  HDQTS distance: {:.2}", dist);
-    println!("  Improvement:    {:.2}%", improvement);
-    println!("  Execution time: {:.3}s", elapsed);
-    println!("  DAG nodes:      {}", dag.nodes.len());
-    println!("  DAG leaves:     {}", dag.leaves.len());
-    println!("  Route valid:    YES ({} unique cities)", n);
-    
-    // NN baseline should be a reasonable upper bound
-    // (HDQTS should not be worse than 2x NN)
-    assert!(dist <= nn_dist * 2.0, "HDQTS distance {} is > 2x NN baseline {}", dist, nn_dist);
-}
 }

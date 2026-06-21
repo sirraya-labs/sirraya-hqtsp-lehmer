@@ -48,3 +48,7 @@ strip = true
 
 [profile.dev]
 opt-level = 0
+
+[[bin]]
+name = "hdqtsp"
+path = "src/main.rs"
